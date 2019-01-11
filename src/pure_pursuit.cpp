@@ -17,6 +17,7 @@
 #include <nav_msgs/Path.h>
 #include <nav_msgs/Odometry.h>
 #include <ackermann_msgs/AckermannDriveStamped.h>
+#include <tf/transform_datatypes.h>
 
 #include <kdl/frames.hpp>
 
@@ -67,6 +68,8 @@ private:
   // Algorithm variables
   // Position tolerace is measured along the x-axis of the robot!
   double ld_, pos_tol_;
+  // Orientation tolerance
+  double orientation_tol_;
   // Generic control variables
   double v_max_, v_, w_max_;
   // Control variables for Ackermann steering
@@ -74,7 +77,9 @@ private:
   double delta_, delta_vel_, acc_, jerk_, delta_max_;
   nav_msgs::Path path_;
   unsigned idx_;
-  bool goal_reached_;
+  bool goal_reached_, orientation_reached_;
+  double yaw_rate_gain_;
+  geometry_msgs::PoseStamped goal_pose_;
   geometry_msgs::Twist cmd_vel_;
   ackermann_msgs::AckermannDriveStamped cmd_acker_;
   
@@ -94,8 +99,8 @@ private:
 };
 
 PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos_tol_(0.1), idx_(0),
-                             goal_reached_(true), nh_private_("~"), tf_listener_(tf_buffer_),
-                             map_frame_id_("map"), robot_frame_id_("base_link"),
+                             goal_reached_(true), orientation_reached_(true), nh_private_("~"),
+                             tf_listener_(tf_buffer_), map_frame_id_("map"), robot_frame_id_("base_link"),
                              lookahead_frame_id_("lookahead")
 {
   // Get parameters from the parameter server
@@ -104,6 +109,7 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
   //nh_private_.param<double>("linear_velocity", v_, 0.1);
   nh_private_.param<double>("max_rotational_velocity", w_max_, 1.0);
   nh_private_.param<double>("position_tolerance", pos_tol_, 0.1);
+  nh_private_.param<double>("orientation_tolerance", orientation_tol_, 0.1);
   nh_private_.param<double>("steering_angle_velocity", delta_vel_, 100.0);
   nh_private_.param<double>("acceleration", acc_, 100.0);
   nh_private_.param<double>("jerk", jerk_, 100.0);
@@ -115,6 +121,8 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
   nh_private_.param<string>("lookahead_frame_id", lookahead_frame_id_, "lookahead");
   // Frame attached to midpoint of front axle (for front-steered vehicles).
   nh_private_.param<string>("ackermann_frame_id", acker_frame_id_, "rear_axle_midpoint");
+  nh_private_.param<double>("yaw_rate_gain", yaw_rate_gain_, 1.0);
+
 
   // Populate messages with static data
   lookahead_.header.frame_id = robot_frame_id_;
@@ -192,24 +200,24 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
         // Find the intersection between the circle of radius ld
         // centered at the robot (origin)
         // and the line defined by the last path pose
-        double roll, pitch, yaw;
-        F_bl_end.M.GetRPY(roll, pitch, yaw);
-        double k_end = tan(yaw); // Slope of line defined by the last path pose
-        double l_end = F_bl_end.p.y() - k_end * F_bl_end.p.x();
-        double a = 1 + k_end * k_end;
-        double b = 2 * l_end;
-        double c = l_end * l_end - ld_ * ld_;
-        double D = sqrt(b*b - 4*a*c);
-        double x_ld = (-b + copysign(D,v_)) / (2*a);
-        double y_ld = k_end * x_ld + l_end;
-        
-        lookahead_.transform.translation.x = x_ld;
-        lookahead_.transform.translation.y = y_ld;
-        lookahead_.transform.translation.z = F_bl_end.p.z();
-        F_bl_end.M.GetQuaternion(lookahead_.transform.rotation.x,
-                                 lookahead_.transform.rotation.y,
-                                 lookahead_.transform.rotation.z,
-                                 lookahead_.transform.rotation.w);
+//        double roll, pitch, yaw;
+//        F_bl_end.M.GetRPY(roll, pitch, yaw);
+//        double k_end = tan(yaw); // Slope of line defined by the last path pose
+//        double l_end = F_bl_end.p.y() - k_end * F_bl_end.p.x();
+//        double a = 1 + k_end * k_end;
+//        double b = 2 * l_end;
+//        double c = l_end * l_end - ld_ * ld_;
+//        double D = sqrt(b*b - 4*a*c);
+//        double x_ld = (-b + copysign(D,v_)) / (2*a);
+//        double y_ld = k_end * x_ld + l_end;
+//
+//        lookahead_.transform.translation.x = x_ld;
+//        lookahead_.transform.translation.y = y_ld;
+//        lookahead_.transform.translation.z = F_bl_end.p.z();
+//        F_bl_end.M.GetQuaternion(lookahead_.transform.rotation.x,
+//                                 lookahead_.transform.rotation.y,
+//                                 lookahead_.transform.rotation.z,
+//                                 lookahead_.transform.rotation.w);
       }
     }
 
@@ -239,20 +247,56 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
     else
     {
       // We are at the goal!
+      if (!orientation_reached_) {
+        // On spot heading tracking
 
-      // Stop the vehicle
-      
-      // The lookahead target is at our current pose.
-      lookahead_.transform = geometry_msgs::Transform();
-      lookahead_.transform.rotation.w = 1.0;
-      
-      // Stop moving.
-      cmd_vel_.linear.x = 0.0;
-      cmd_vel_.angular.z = 0.0;
+        tf::Quaternion q_path( goal_pose_.pose.orientation.x,
+                               goal_pose_.pose.orientation.y,
+                               goal_pose_.pose.orientation.z,
+                               goal_pose_.pose.orientation.w);
+        tf::Matrix3x3 m_path(q_path);
+        double roll_path, pitch_path, yaw_path;
+        m_path.getRPY(roll_path, pitch_path, yaw_path);
 
-      cmd_acker_.header.stamp = ros::Time::now();
-      cmd_acker_.drive.steering_angle = 0.0;
-      cmd_acker_.drive.speed = 0.0;
+        tf::Quaternion q_robot(tf.transform.rotation.x,
+                               tf.transform.rotation.y,
+                               tf.transform.rotation.z,
+                               tf.transform.rotation.w);
+        tf::Matrix3x3 m_robot(q_robot);
+        double roll_robot, pitch_robot, yaw_robot;
+        m_robot.getRPY(roll_robot, pitch_robot, yaw_robot);
+
+        // P gain with warping and output saturation
+        double yaw_error = yaw_path - yaw_robot;
+        yaw_error = std::fmod(yaw_error + M_PI, 2*M_PI) - M_PI;
+        double yaw_rate_setpoint = yaw_rate_gain_ * yaw_error;
+        yaw_rate_setpoint = std::min(std::max(yaw_rate_setpoint, -w_max_), w_max_);
+        cmd_vel_.angular.z = yaw_rate_setpoint;
+        cmd_vel_.linear.x = 0.0;
+
+        // termination criteria
+        if (std::fabs(yaw_path - yaw_robot) < orientation_tol_)
+           orientation_reached_ = true;
+
+      } else {
+        // We are at the goal with the desired heading
+
+        // Stop the vehicle
+
+        // The lookahead target is at our current pose.
+        lookahead_.transform = geometry_msgs::Transform();
+        lookahead_.transform.rotation.w = 1.0;
+
+        // Stop moving.
+        cmd_vel_.linear.x = 0.0;
+        cmd_vel_.angular.z = 0.0;
+
+        cmd_acker_.header.stamp = ros::Time::now();
+        cmd_acker_.drive.steering_angle = 0.0;
+        cmd_acker_.drive.speed = 0.0;
+
+      }
+
     }
 
     // Publish the lookahead target transform.
@@ -285,7 +329,9 @@ void PurePursuit::receivePath(nav_msgs::Path new_path)
     idx_ = 0;
     if (new_path.poses.size() > 0)
     {
+      goal_pose_ = new_path.poses.back();
       goal_reached_ = false;
+      orientation_reached_ = false;
     }
     else
     {

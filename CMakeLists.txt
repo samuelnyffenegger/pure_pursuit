@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   nav_msgs
   ackermann_msgs
+  tf
   tf2
   tf2_ros
   rospy
@@ -30,7 +31,7 @@ generate_dynamic_reconfigure_options(
 ###################################
 
 catkin_package(
-  CATKIN_DEPENDS roscpp std_msgs geometry_msgs nav_msgs ackermann_msgs tf2 tf2_ros rospy dynamic_reconfigure
+  CATKIN_DEPENDS roscpp std_msgs geometry_msgs nav_msgs ackermann_msgs tf tf2 tf2_ros rospy dynamic_reconfigure
   )
 
 
