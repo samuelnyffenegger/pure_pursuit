@@ -28,6 +28,7 @@
 
 #include <dynamic_reconfigure/server.h>
 #include <pure_pursuit/PurePursuitConfig.h>
+#include <geometry_msgs/TwistStamped.h>
 
 using std::string;
 
@@ -62,7 +63,9 @@ private:
 
   //! Dynamic reconfigure callback.
   void reconfigure(pure_pursuit::PurePursuitConfig &config, uint32_t level);
-  
+
+  // boolean to differentiate output (twist for simulation, otherwise twistStamped)
+  bool use_simulation_;
   // Vehicle parameters
   double L_;
   // Algorithm variables
@@ -81,6 +84,7 @@ private:
   double yaw_rate_gain_;
   geometry_msgs::PoseStamped goal_pose_;
   geometry_msgs::Twist cmd_vel_;
+  geometry_msgs::TwistStamped cmd_vel_stamped_;
   ackermann_msgs::AckermannDriveStamped cmd_acker_;
   
   // Ros infrastructure
@@ -104,6 +108,7 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
                              lookahead_frame_id_("lookahead")
 {
   // Get parameters from the parameter server
+  nh_private_.param<bool>("use_simulation", use_simulation_, false);
   nh_private_.param<double>("wheelbase", L_, 1.0);
   nh_private_.param<double>("lookahead_distance", ld_, 1.0);
   //nh_private_.param<double>("linear_velocity", v_, 0.1);
@@ -135,7 +140,10 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
   
   sub_path_ = nh_.subscribe("path_segment", 1, &PurePursuit::receivePath, this);
   sub_odom_ = nh_.subscribe("odometry", 1, &PurePursuit::computeVelocities, this);
-  pub_vel_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 1);
+  if (use_simulation_)
+    pub_vel_ = nh_.advertise<geometry_msgs::Twist>("cmd_vel", 1);
+  else
+    pub_vel_ = nh_.advertise<geometry_msgs::TwistStamped>("cmd_vel", 1);
   pub_acker_ = nh_.advertise<ackermann_msgs::AckermannDriveStamped>("cmd_acker", 1);
 
   reconfigure_callback_ = boost::bind(&PurePursuit::reconfigure, this, _1, _2);
@@ -304,8 +312,16 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
     tf_broadcaster_.sendTransform(lookahead_);
     
     // Publish the velocities
-    pub_vel_.publish(cmd_vel_);
-    
+    if (use_simulation_)
+      pub_vel_.publish(cmd_vel_);
+    else {
+      cmd_vel_stamped_.header.stamp = ros::Time::now();
+      cmd_vel_stamped_.header.frame_id = "base";
+      cmd_vel_stamped_.twist.angular = cmd_vel_.angular;
+      cmd_vel_stamped_.twist.linear = cmd_vel_.linear;
+      pub_vel_.publish(cmd_vel_stamped_);
+    }
+
     // Publish ackerman steering setpoints
     pub_acker_.publish(cmd_acker_);
   }
