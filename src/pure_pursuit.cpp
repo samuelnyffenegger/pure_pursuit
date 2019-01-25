@@ -90,6 +90,7 @@ private:
   double zeroSpeedThreshold; // if yaw rate exceeds 80% of its maximum
   double weightNewSpeedScalingAccelerate, weightNewSpeedScalingBrake;
   bool useSpeedTuning;
+  bool useAbsolutePositionController;
 
   // Ros infrastructure
   ros::NodeHandle nh_, nh_private_;
@@ -109,7 +110,7 @@ private:
 PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos_tol_(0.1), idx_(0),
                              goal_reached_(true), orientation_reached_(true), nh_private_("~"),
                              tf_listener_(tf_buffer_), map_frame_id_("map"), robot_frame_id_("base_link"),
-                             lookahead_frame_id_("lookahead")
+                             lookahead_frame_id_("lookahead"), useAbsolutePositionController(false)
 {
   // Get parameters from the parameter server
   nh_private_.param<bool>("use_simulation", use_simulation_, false);
@@ -212,6 +213,16 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
       }
       else
       {
+        // Absolute position controller
+        useAbsolutePositionController = true;
+        lookahead_.transform.translation.x = F_bl_end.p.x();
+        lookahead_.transform.translation.y = F_bl_end.p.y();
+        lookahead_.transform.rotation.w = 1;
+        lookahead_.transform.rotation.x = 0;
+        lookahead_.transform.rotation.y = 0;
+        lookahead_.transform.rotation.z = 0;
+//        ROS_INFO_STREAM("Position error [m]: " << F_bl_end.p.Norm() );
+
         // We need to extend the lookahead distance
         // beyond the goal point.
       
@@ -239,42 +250,52 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
       }
     }
 
-    if (!goal_reached_)
-    {
+    if (!goal_reached_) {
       // We are tracking.
 
-      // Compute linear velocity.
-      // Right now,this is not very smart :)
-      v_ = copysign(v_max_, v_);
-      
-      // Compute the angular velocity.
-      // Lateral error is the y-value of the lookahead point (in base_link frame)
-      double yt = lookahead_.transform.translation.y;
-      double ld_2 = ld_ * ld_;
-      cmd_vel_.angular.z = std::min( 2*v_ / ld_2 * yt, w_max_ );
+      if (!useAbsolutePositionController) {
+        // Compute linear velocity.
+        // Right now,this is not very smart :)
+        v_ = copysign(v_max_, v_);
 
-      // Compute desired Ackermann steering angle
-      cmd_acker_.drive.steering_angle = std::min( atan2(2 * yt * L_, ld_2), delta_max_ );
-      
-      // Set linear velocity for tracking.
-      cmd_vel_.linear.x = v_;
-      cmd_acker_.drive.speed = v_;
-      cmd_acker_.header.stamp = ros::Time::now();
+        // Compute the angular velocity.
+        // Lateral error is the y-value of the lookahead point (in base_link frame)
+        double yt = lookahead_.transform.translation.y;
+        double ld_2 = ld_ * ld_;
+        cmd_vel_.angular.z = std::min( 2*v_ / ld_2 * yt, w_max_ );
 
-      // yaw control input based speed reduction
-      if (useSpeedTuning) {
-        static double speedScalingOld = 0.0;
-        double speedScaling = 1.0 - (fabs(cmd_vel_.angular.z) / w_max_ - fullSpeedThreshold) /
-                                    (zeroSpeedThreshold - fullSpeedThreshold);
-        speedScaling = std::min(std::max(speedScaling, 0.0), 1.0);
+        // Compute desired Ackermann steering angle
+        cmd_acker_.drive.steering_angle = std::min( atan2(2 * yt * L_, ld_2), delta_max_ );
 
-        if (speedScaling > speedScalingOld)
-          speedScaling = weightNewSpeedScalingAccelerate*speedScaling + (1.0-weightNewSpeedScalingAccelerate)*speedScalingOld;
+        // Set linear velocity for tracking.
+        cmd_vel_.linear.x = v_;
+        cmd_acker_.drive.speed = v_;
+        cmd_acker_.header.stamp = ros::Time::now();
+
+        // yaw control input based speed reduction
+        if (useSpeedTuning) {
+          static double speedScalingOld = 0.0;
+          double speedScaling = 1.0 - (fabs(cmd_vel_.angular.z) / w_max_ - fullSpeedThreshold) /
+                                      (zeroSpeedThreshold - fullSpeedThreshold);
+          speedScaling = std::min(std::max(speedScaling, 0.0), 1.0);
+
+          if (speedScaling > speedScalingOld)
+            speedScaling = weightNewSpeedScalingAccelerate*speedScaling + (1.0-weightNewSpeedScalingAccelerate)*speedScalingOld;
+          else
+            speedScaling = weightNewSpeedScalingBrake*speedScaling + (1.0-weightNewSpeedScalingBrake)*speedScalingOld;
+
+          speedScalingOld = speedScaling;
+          cmd_vel_.linear.x *= speedScaling;
+        }
+
+      } else {
+        cmd_vel_.angular.z = copysign(w_max_/5.0, lookahead_.transform.translation.y);
+        cmd_vel_.linear.x = v_max_/5.0;
+        if (cmd_vel_.angular.z > 0.01)
+          cmd_vel_.linear.x = 0;
         else
-          speedScaling = weightNewSpeedScalingBrake*speedScaling + (1.0-weightNewSpeedScalingBrake)*speedScalingOld;
-
-        speedScalingOld = speedScaling;
-        cmd_vel_.linear.x *= speedScaling;
+          cmd_vel_.angular.z = 0;
+//        ROS_INFO_STREAM("vx: " << cmd_vel_.linear.x << ", wz: " << cmd_vel_.angular.z );
       }
 
     }
@@ -304,9 +325,11 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
         double yaw_error = yaw_path - yaw_robot;
         yaw_error = std::fmod(yaw_error + M_PI, 2*M_PI) - M_PI;
         double yaw_rate_setpoint = yaw_rate_gain_ * yaw_error;
-        yaw_rate_setpoint = std::min(std::max(yaw_rate_setpoint, -w_max_), w_max_);
+        yaw_rate_setpoint = std::min(std::max(yaw_rate_setpoint, -w_max_/5.0), w_max_/5.0);
         cmd_vel_.angular.z = yaw_rate_setpoint;
         cmd_vel_.linear.x = 0.0;
+
+//        ROS_INFO_STREAM("Heading error [deg]: " << 180.0/KDL::PI*std::fabs(yaw_path - yaw_robot));
 
         // termination criteria
         if (std::fabs(yaw_path - yaw_robot) < orientation_tol_)
