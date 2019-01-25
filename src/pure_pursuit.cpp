@@ -86,7 +86,11 @@ private:
   geometry_msgs::Twist cmd_vel_;
   geometry_msgs::TwistStamped cmd_vel_stamped_;
   ackermann_msgs::AckermannDriveStamped cmd_acker_;
-  
+  double fullSpeedThreshold; // if yaw rate is below 40% of its maximum
+  double zeroSpeedThreshold; // if yaw rate exceeds 80% of its maximum
+  double weightNewSpeedScalingAccelerate, weightNewSpeedScalingBrake;
+  bool useSpeedTuning;
+
   // Ros infrastructure
   ros::NodeHandle nh_, nh_private_;
   ros::Subscriber sub_odom_, sub_path_;
@@ -127,6 +131,12 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
   // Frame attached to midpoint of front axle (for front-steered vehicles).
   nh_private_.param<string>("ackermann_frame_id", acker_frame_id_, "rear_axle_midpoint");
   nh_private_.param<double>("yaw_rate_gain", yaw_rate_gain_, 1.0);
+  nh_private_.param<double>("zero_speed_threshold", zeroSpeedThreshold, 0.8);
+  nh_private_.param<double>("full_speed_threshold", fullSpeedThreshold, 0.2);
+  nh_private_.param<double>("weight_new_speed_scaling/accelerate", weightNewSpeedScalingAccelerate, 0.1);
+  nh_private_.param<double>("weight_new_speed_scaling/brake", weightNewSpeedScalingBrake, 0.01);
+  nh_private_.param<bool>("use_speed_tuning", useSpeedTuning, true);
+
 
 
   // Populate messages with static data
@@ -249,8 +259,24 @@ void PurePursuit::computeVelocities(nav_msgs::Odometry odom)
       // Set linear velocity for tracking.
       cmd_vel_.linear.x = v_;
       cmd_acker_.drive.speed = v_;
-
       cmd_acker_.header.stamp = ros::Time::now();
+
+      // yaw control input based speed reduction
+      if (useSpeedTuning) {
+        static double speedScalingOld = 0.0;
+        double speedScaling = 1.0 - (fabs(cmd_vel_.angular.z) / w_max_ - fullSpeedThreshold) /
+                                    (zeroSpeedThreshold - fullSpeedThreshold);
+        speedScaling = std::min(std::max(speedScaling, 0.0), 1.0);
+
+        if (speedScaling > speedScalingOld)
+          speedScaling = weightNewSpeedScalingAccelerate*speedScaling + (1.0-weightNewSpeedScalingAccelerate)*speedScalingOld;
+        else
+          speedScaling = weightNewSpeedScalingBrake*speedScaling + (1.0-weightNewSpeedScalingBrake)*speedScalingOld;
+
+        speedScalingOld = speedScaling;
+        cmd_vel_.linear.x *= speedScaling;
+      }
+
     }
     else
     {
