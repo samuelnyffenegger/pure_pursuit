@@ -108,7 +108,7 @@ PurePursuit::PurePursuit() : ld_(1.0), v_max_(0.1), v_(v_max_), w_max_(1.0), pos
                              lookahead_frame_id_("lookahead")
 {
   // Get parameters from the parameter server
-  nh_private_.param<bool>("use_simulation", use_simulation_, false);
+  nh_private_.param<bool>("use_simulation", use_simulation_, true);
   nh_private_.param<double>("wheelbase", L_, 1.0);
   nh_private_.param<double>("lookahead_distance", ld_, 1.0);
   //nh_private_.param<double>("linear_velocity", v_, 0.1);
